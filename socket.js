@@ -7,11 +7,12 @@
 
 const { EventEmitter } = require('node:events');
 const { X509Certificate } = require('node:crypto');
-const msgpack = require('msgpack5')();
-const net = require('node:net');
 const fs = require('node:fs');
+const net = require('node:net');
 const tls = require('node:tls');
-const _ = require('lodash');
+
+const msgpack = require('msgpack5')();
+//const _ = require('lodash');
 
 /**
  * Errors to ignore during connection handling.
@@ -51,6 +52,30 @@ function parseAddress(address) {
     port: Number(parsed.port),
     host: parsed.hostname.replace(/^\[|\]$/g, '')
   };
+}
+
+/**
+ * Restore Buffer instances in decoded MessagePack data.
+ */
+function restoreBuffers(value) {
+  if (Array.isArray(value)) {
+    return value.map(restoreBuffers);
+  }
+
+  if (value && typeof value === 'object') {
+    if (
+      value.type === 'Buffer' &&
+      Array.isArray(value.data)
+    ) {
+      return Buffer.from(value.data);
+    }
+
+    for (const key of Object.keys(value)) {
+      value[key] = restoreBuffers(value[key]);
+    }
+  }
+
+  return value;
 }
 
 /**
@@ -174,7 +199,7 @@ module.exports = function createSocket(debug = () => {}) {
 
       let remaining = sockets.length;
 
-      const done = () => {
+      const onSocketClose = () => {
         remaining--;
 
         if (remaining === 0) {
@@ -185,11 +210,11 @@ module.exports = function createSocket(debug = () => {}) {
       for (const sock of sockets) {
         if (sock.destroyed) {
           this.removeSocket(sock);
-          done();
+          onSocketClose();
           continue;
         }
 
-        sock.once('close', done);
+        sock.once('close', onSocketClose);
         sock.end();
       }
     }
@@ -199,6 +224,8 @@ module.exports = function createSocket(debug = () => {}) {
      */
 
     closeServer(callback) {
+      callback = callback || (() => {});
+
       if (!this.server || !this.server.listening) {
         callback();
         return;
@@ -229,22 +256,24 @@ module.exports = function createSocket(debug = () => {}) {
 
       this.reconnectTimers.clear();
 
-      const tasks = [];
-
-      tasks.push(new Promise(resolve => {
-        this.closeSockets(resolve);
-      }));
+      const tasks = [
+        new Promise(resolve => {
+          this.closeSockets(resolve);
+        })
+      ];
 
       if (this.server) {
-        tasks.push(new Promise((resolve, reject) => {
-          this.closeServer(error => {
-            if (error) {
-              reject(error);
-            } else {
-              resolve();
-            }
-          });
-        }));
+        tasks.push(
+          new Promise((resolve, reject) => {
+            this.closeServer(error => {
+              if (error) {
+                reject(error);
+              } else {
+                resolve();
+              }
+            });
+          })
+        );
       }
 
       Promise.all(tasks).then(
@@ -316,13 +345,13 @@ module.exports = function createSocket(debug = () => {}) {
 
       const decoder = msgpack.decoder();
 
-      sock.pipe(decoder);
-
       decoder.on('data', this.onmessage(sock));
 
       decoder.on('error', error => {
         this.emit('error', error);
       });
+
+      sock.pipe(decoder);
     }
 
     /**
@@ -331,9 +360,11 @@ module.exports = function createSocket(debug = () => {}) {
 
     handleErrors(sock) {
       sock.on('error', error => {
+        const errorCode = error.code || error.message;
+
         debug(
           'error',
-          this.type + ' error ' + (error.code || error.message)
+          this.type + ' error ' + errorCode
         );
 
         this.emit('socket error', error);
@@ -345,7 +376,7 @@ module.exports = function createSocket(debug = () => {}) {
           return;
         }
 
-        debug('trace', this.type + ' ignored ' + error.code);
+        debug('trace', this.type + ' ignored ' + errorCode);
 
         this.emit('ignored error', error);
       });
@@ -386,11 +417,9 @@ module.exports = function createSocket(debug = () => {}) {
 
             debug('trace', 'peer went away');
 
-            process.nextTick(() => {
-              if (callback) {
-                callback(false);
-              }
-            });
+            if (callback) {
+              process.nextTick(callback, false);
+            }
 
             return false;
           }
@@ -419,6 +448,7 @@ module.exports = function createSocket(debug = () => {}) {
           return callback(emitter);
         }
 
+        /* Remplacer pour supprimer lodash
         const decodedArgs = _.cloneDeepWith(args, entry => {
           if (
             _.isObject(entry) &&
@@ -430,6 +460,8 @@ module.exports = function createSocket(debug = () => {}) {
 
           return undefined;
         });
+        */
+        const decodedArgs = restoreBuffers(args);
 
         decodedArgs.unshift('message');
         decodedArgs.push(emitter);
@@ -547,14 +579,19 @@ module.exports = function createSocket(debug = () => {}) {
       let connected = false;
 
       const onConnect = () => {
+        if (connected) {
+          return;
+        }
+
         if (this.closing || sock.destroyed) {
           sock.destroy();
           return;
         }
 
+        connected = true;
+
         debug('trace', this.type + ' connect');
 
-        connected = true;
         this.connected = true;
         this.retry = this.get('retry timeout');
 
@@ -604,7 +641,8 @@ module.exports = function createSocket(debug = () => {}) {
       this.handleErrors(sock);
 
       sock.on('close', () => {
-        sock.removeAllListeners();
+        // Inuitle car nodejs gère naturellement les fin de vie des sockets
+        // sock.removeAllListeners();
 
         if (connected) {
           this.emit('socket close', sock.identity);

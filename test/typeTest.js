@@ -74,6 +74,60 @@ describe('type', function() {
     server.emit('client', 'myEvent', [0,1,2]);
   });
 
+
+  it('nested buffer in object', function(done) {
+    const expected = Buffer.from('buffer imbrique');
+
+    server.on('myEvent', function(msg) {
+      assert(Buffer.isBuffer(msg.data.buffer));
+      assert.deepStrictEqual(msg.data.buffer, expected);
+      done();
+    });
+
+    client.emit('server', 'myEvent', {
+      data: {
+        buffer: expected
+      }
+    });
+  });
+
+  it('nested buffer in array', function(done) {
+    const expected = Buffer.from('buffer tableau');
+
+    server.on('myEvent', function(msg) {
+      assert(Buffer.isBuffer(msg[0][0]));
+      assert.deepStrictEqual(msg[0][0], expected);
+      done();
+    });
+
+    client.emit('server', 'myEvent', [
+      [expected]
+    ]);
+  });
+
+  it('deeply nested buffers', function(done) {
+    const expected = Buffer.from('buffer profond');
+
+    server.on('myEvent', function(msg) {
+      const received = msg.data.items[0].buffer;
+
+      assert(Buffer.isBuffer(received));
+      assert.deepStrictEqual(received, expected);
+      done();
+    });
+
+    client.emit('server', 'myEvent', {
+      data: {
+        items: [
+          {
+            buffer: expected
+          }
+        ]
+      }
+    });
+  });
+
+
   afterEach(function() {
     server.removeAllListeners();
     client.removeAllListeners();
