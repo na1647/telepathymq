@@ -70,6 +70,16 @@ describe('defer', function() {
     client.defer('server', 'myDefer', {buffer: Buffer.from('this a Buffer')});
   });
 
+  it('should reject when identity is not registered', function(done) {
+    const defer = client.defer('unknown', 'myDefer');
+
+    defer.fail(function(error) {
+      assert(error instanceof Error);
+      assert.equal(error.message, 'unknown is not registered');
+      done();
+    });
+  });
+
   afterEach(function() {
     server.removeAllListeners();
     client.removeAllListeners();

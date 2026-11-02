@@ -29,7 +29,7 @@ class Telepathymq extends EventEmitter {
 
 module.exports = Telepathymq;
 
-var deferHandler = function(self, task, event, emitter) {
+const deferHandler = (self, task, event, emitter) => {
   switch (task) {
     case 'defer.resolve':
       if (self.defers[event.id]) {
@@ -37,37 +37,57 @@ var deferHandler = function(self, task, event, emitter) {
         delete self.defers[event.id];
       }
       break;
+
     case 'defer.notify':
       if (self.defers[event.id]) {
         self.defers[event.id].notify(event.data);
       }
       break;
+
     case 'defer.reject':
       if (self.defers[event.id]) {
         self.defers[event.id].reject(event.data);
         delete self.defers[event.id];
       }
       break;
-    case 'defer.new':
-      var defer = asynk.deferred();
-      defer.done(function(data) {
+
+    case 'defer.new': {
+      const defer = asynk.deferred();
+
+      defer.done(data => {
         event.data = data;
         emitter.emit('defer.resolve', event);
       });
-      defer.fail(function(data) {
+
+      defer.fail(data => {
         event.data = data;
         emitter.emit('defer.reject', event);
       });
-      defer.progress(function(data) {
+
+      defer.progress(data => {
         event.data = data;
         emitter.emit('defer.notify', event);
       });
-      EventEmitter.prototype.emit.call(self, event.name, defer, event.data);
+
+      EventEmitter.prototype.emit.call(
+        self,
+        event.name,
+        defer,
+        event.data
+      );
       break;
+    }
   }
 };
 
-var eventHandler = function(self, task, event) {
+/*
+ * Point important : nous ne remplaçons surtout pas cet appel par self.emit().
+ * En effet, Telepathymq pourrait recevoir une redéfinition de emit() destinée
+ * à envoyer des messages IPC. Utiliser directement self.emit() risquerait de
+ * provoquer une récursion ou de modifier le comportement public.
+ * C'est donc une bonne raison de conserver explicitement l'appel à EventEmitter.prototype.emit.
+*/
+const eventHandler = (self, task, event) => {
   switch (task) {
     case 'event.emit':
       EventEmitter.prototype.emit.call(self, event.name, event.data);
@@ -75,99 +95,163 @@ var eventHandler = function(self, task, event) {
   }
 };
 
-
 Telepathymq.prototype.listen = function(port, host, fn) {
-  const self = this;
   const Socket = createSocket(this.debug);
   const sock = new Socket();
 
   sock.set('identity', this.identity);
-  sock.on('register', function(identity, emitter) {
-    self.relations[identity] = emitter;
-    EventEmitter.prototype.emit.call(self, 'register', identity, emitter);
+
+  sock.on('register', (identity, emitter) => {
+    this.relations[identity] = emitter;
+
+    EventEmitter.prototype.emit.call(
+      this,
+      'register',
+      identity,
+      emitter
+    );
   });
-  sock.on('socket close', function(identity) {
-    self.relations[identity] = null;
-    EventEmitter.prototype.emit.call(self, 'unregister', identity);
+
+  sock.on('socket close', identity => {
+    this.relations[identity] = null;
+
+    EventEmitter.prototype.emit.call(
+      this,
+      'unregister',
+      identity
+    );
   });
-  sock.on('message', function(task, event, emitter) {
-    deferHandler(self, task, event, emitter);
-    eventHandler(self, task, event, emitter);
+
+  sock.on('message', (task, event, emitter) => {
+    deferHandler(this, task, event, emitter);
+    eventHandler(this, task, event);
   });
-  // check for tls protocol
-  if (typeof port === 'string' && port.startsWith('tls') && typeof host === 'object') {
+
+  // Check for TLS protocol.
+  if (
+    typeof port === 'string' &&
+    port.startsWith('tls') &&
+    typeof host === 'object'
+  ) {
     sock.set('tls', host);
     sock.bind(port, fn);
   } else {
     sock.bind(port, host, fn);
   }
+
   this.socks.push(sock);
+
   return sock;
 };
 
 Telepathymq.prototype.register = function(identity, connectString, options, cb) {
-  const self = this;
   if (typeof options === 'function') {
     cb = options;
     options = null;
   }
-  cb = cb || new Function();
+
+  cb = cb || (() => {});
+
   const Socket = createSocket(this.debug);
   const sock = new Socket();
+
   sock.set('identity', this.identity);
+
   if (connectString.startsWith('tls') && typeof options === 'object') {
     sock.set('tls', options);
   }
-  sock.register(identity, connectString, function(emitter) {
-    self.relations[identity] = emitter;
-    EventEmitter.prototype.emit.call(self, 'register', identity);
+
+  sock.register(identity, connectString, emitter => {
+    this.relations[identity] = emitter;
+
+    EventEmitter.prototype.emit.call(
+      this,
+      'register',
+      identity
+    );
+
     cb();
   });
-  sock.on('socket close', function(identity) {
-    self.relations[identity] = null;
-    EventEmitter.prototype.emit.call(self, 'unregister', identity);
+
+  sock.on('socket close', identity => {
+    this.relations[identity] = null;
+
+    EventEmitter.prototype.emit.call(
+      this,
+      'unregister',
+      identity
+    );
   });
-  sock.on('message', function(task, event, emitter) {
-    deferHandler(self, task, event, emitter);
-    eventHandler(self, task, event, emitter);
+
+  sock.on('message', (task, event, emitter) => {
+    deferHandler(this, task, event, emitter);
+    eventHandler(this, task, event);
   });
+
   this.socks.push(sock);
 };
 
 Telepathymq.prototype.defer = function(identity, eventName, data) {
   const defer = asynk.deferred();
   const emitter = this.relations[identity];
+
   if (!emitter) {
     defer.reject(new Error(identity + ' is not registered'));
     return defer;
   }
+
   const deferId = randomUUID();
+
   this.defers[deferId] = defer;
+
   const event = {
     name: eventName,
     id: deferId,
-    data: data
+    data
   };
+
   emitter.emit('defer.new', event);
+
   return defer.promise();
 };
 
 Telepathymq.prototype.emit = function(identity, eventName, data) {
   const emitter = this.relations[identity];
+
   if (!emitter) {
     return false;
   }
+
   const event = {
     name: eventName,
-    data: data
+    data
   };
+
   emitter.emit('event.emit', event);
+
   return true;
 };
 
 Telepathymq.prototype.close = function(cb) {
-  cb = cb || new Function();
-  asynk.each(this.socks, function(sock, cb) {
-    sock.close(cb);
-  }).parallel().asCallback(cb);
+  cb = cb || (() => {});
+
+  const tasks = this.socks.map(sock => {
+    return new Promise((resolve, reject) => {
+      sock.close(error => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    });
+  });
+
+  Promise.allSettled(tasks).then(results => {
+    const failed = results.find(
+      result => result.status === 'rejected'
+    );
+
+    cb(failed ? failed.reason : undefined);
+  });
 };
