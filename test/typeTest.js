@@ -49,7 +49,7 @@ describe('type', function() {
 
   it('number', function(done) {
     client.on('myEvent', function(msg) {
-      assert(_.isNumber(msg), 'should receive a string');
+      assert(_.isNumber(msg), 'should receive a number');
       done();
     });
     server.emit('client', 'myEvent', 1);

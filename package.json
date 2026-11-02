@@ -1,46 +1,52 @@
 {
+  "name": "telepathymq",
+  "version": "1.0.1",
+  "description": "IPC for Node.js",
   "author": {
-    "name": "Alexandre Tiertant",
-    "email": "a.tiertant@atlantis-software.net"
+    "name": "Nicolas AMIOT",
+    "email": "n.amiot@bringyoup.fr",
+    "description": "Migration en node20.20 compatible avec node 22",
+    "contributors": [
+      {
+        "name": "Alexandre Tiertant",
+        "email": "a.tiertant@atlantis-software.net",
+        "url": "https://github.com/Atlantis-Software/telepathymq.git"
+      }
+    ]
+  },
+  "license": "MIT",
+  "main": "./index.js",
+  "homepage": "https://github.com/na1647/telepathymq",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/na1647/telepathymq.git"
   },
   "bugs": {
-    "url": "https://github.com/Atlantis-Software/telepathymq/issues"
+    "url": "https://github.com/na1647/telepathymq/issues"
   },
-  "dependencies": {
-    "asynk": "~0.0.12",
-    "lodash": "~4.17.21",
-    "msgpack5": "~5.3.2",
-    "uuid": "~8.3.2",
-    "node-forge": "~0.10.0"
-  },
-  "deprecated": false,
-  "description": "ipc for node",
-  "devDependencies": {
-    "coveralls": "^3.0.2",
-    "eslint": "~5.6.0",
-    "istanbul": "0.4.5",
-    "mocha": "~5.2.0",
-    "nyc": "~13.1.0"
-  },
-  "engines": {
-    "node": ">= 0.10.0"
-  },
-  "homepage": "https://github.com/Atlantis-Software/telepathymq",
   "keywords": [
     "ipc",
     "inter-process"
   ],
-  "license": "MIT",
-  "main": "./index.js",
-  "name": "telepathymq",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/Atlantis-Software/telepathymq.git"
+  "engines": {
+    "node": ">=20.20.0"
+  },
+  "dependencies": {
+    "asynk": "~0.0.12",
+    "lodash": "~4.17.21",
+    "msgpack5": "~5.3.2"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "coveralls": "^3.1.1",
+    "eslint": "^9.39.5",
+    "globals": "^17.14.0",
+    "mocha": "^11.0.0",
+    "nyc": "^17.0.0"
   },
   "scripts": {
     "test": "nyc node ./test/runner.js",
     "coveralls": "nyc report --reporter=text-lcov | coveralls",
-    "lint": "eslint ./"
-  },
-  "version": "0.1.5"
+    "lint": "eslint ."
+  }
 }

@@ -1,22 +1,23 @@
 
+'use strict';
+
 /**
  * Module dependencies.
  */
 
-var Emitter = require('events').EventEmitter;
-var msgpack = require('msgpack5')();
-var url = require('url');
-var net = require('net');
-var fs = require('fs');
-var tls = require('tls');
-var _ = require('lodash');
-var forge = require('node-forge');
+const { EventEmitter } = require('node:events');
+const { X509Certificate } = require('node:crypto');
+const msgpack = require('msgpack5')();
+const net = require('node:net');
+const fs = require('node:fs');
+const tls = require('node:tls');
+const _ = require('lodash');
 
 /**
- * Errors to ignore.
+ * Errors to ignore during connection handling.
  */
 
-var ignore = [
+const ignoredErrors = new Set([
   'ECONNREFUSED',
   'ECONNRESET',
   'ETIMEDOUT',
@@ -25,651 +26,868 @@ var ignore = [
   'ENETDOWN',
   'EPIPE',
   'ENOENT'
-];
+]);
 
 /**
- * Expose `Socket`.
+ * Parse TCP and Unix socket addresses.
  */
 
-module.exports = function(debug) {
+function parseAddress(address) {
+  const parsed = new URL(address);
 
-  debug = debug || new Function();
-
-  /**
-   * Initialize a new `Socket`.
-   *
-   * A "Socket" encapsulates the ability of being
-   * the "client" or the "server" depending on
-   * whether `connect()` or `bind()` was called.
-   *
-   * @api private
-   */
-
-  function Socket() {
-    var self = this;
-    this.server = null;
-    this.socks = [];
-    this.settings = {
-      "hwm": Infinity,
-      "identity": String(process.pid),
-      "retry timeout": 100,
-      "retry max timeout": 5000
+  if (parsed.protocol === 'unix:') {
+    return {
+      unix: true,
+      path: parsed.pathname
     };
-    this.callbacks = {};
-    this.identity = this.get('identity');
-    this.ids = 0;
-    this.queue = [];
-
-    this.on('connect', function(){
-      var prev = self.queue;
-      var len = prev.length;
-      self.queue = [];
-      debug('trace', 'flush ' + len + ' messages');
-
-      for (var i = 0; i < len; ++i) {
-        self.send.apply(this, prev[i]);
-      }
-
-      self.emit('flush', prev);
-    });
   }
 
-  /**
-   * Inherit from `Emitter.prototype`.
-   */
+  if (!parsed.port) {
+    throw new Error('Invalid socket address: missing port');
+  }
 
-  Socket.prototype.__proto__ = Emitter.prototype;
-
-  /**
-   * Make it configurable `.set()` etc.
-   */
-
-  Socket.prototype.get = function(key) {
-    return this.settings[key];
+  return {
+    unix: false,
+    port: Number(parsed.port),
+    host: parsed.hostname.replace(/^\[|\]$/g, '')
   };
+}
 
-  Socket.prototype.set = function(key, value) {
-    this.settings[key] = value;
-  };
+/**
+ * Expose Socket.
+ */
 
-  /**
-  * Provides an `.enqueue()` method to the `sock`. Messages
-  * passed to `enqueue` will be buffered until the next
-  * `connect` event is emitted.
-  *
-  * Emits:
-  *
-  *  - `drop` (msg) when a message is dropped
-  *  - `flush` (msgs) when the queue is flushed
-  *
-  * @param {Object} options
-  * @api private
-  */
+module.exports = function createSocket(debug = () => {}) {
 
-  Socket.prototype.enqueue = function(msg){
-    var hwm = this.settings.hwm;
-    if (this.queue.length >= hwm) {
-      debug('trace', 'drop');
-      this.emit('drop', msg);
-    }
-    this.queue.push(msg);
-  };
+  class Socket extends EventEmitter {
 
-  /**
-   * Return a message id.
-   *
-   * @return {String}
-   * @api private
-   */
+    constructor() {
+      super();
 
-  Socket.prototype.id = function(){
-    var id = this.identity + ':' + this.ids++;
-    return id;
-  };
+      this.server = null;
+      this.socks = [];
 
-  /**
-   * Use the given `plugin`.
-   *
-   * @param {Function} plugin
-   * @api private
-   */
-
-  Socket.prototype.use = function(plugin){
-    plugin(this);
-    return this;
-  };
-
-  /**
-   * Creates a new `Message` and write the `args`.
-   *
-   * @param {Array} args
-   * @return {Buffer}
-   * @api private
-   */
-
-  Socket.prototype.pack = function(args){
-    return msgpack.encode(args).slice();
-  };
-
-  /**
-   * Close all open underlying sockets.
-   *
-   * @api private
-   */
-
-  Socket.prototype.closeSockets = function(fn){
-    debug('trace', this.type + ' closing ' + this.socks.length + ' connections');
-    var i = this.socks.length;
-    if (!i) {
-      return fn();
-    }
-    this.socks.forEach(function(sock){
-      if (fn) {
-        sock.on('end', function listener(){
-          sock.removeListener('close', listener);
-          --i || fn();
-        });
-      }
-      sock.end();
-    });
-  };
-
-  /**
-   * Close the socket.
-   *
-   * Delegates to the server or clients
-   * based on the socket `type`.
-   *
-   * @param {Function} [fn]
-   * @api public
-   */
-
-  Socket.prototype.close = function(fn){
-    debug('trace', this.type + ' closing');
-    this.closing = true;
-    var i = this.server ? 2 : 1;
-    this.closeSockets(function(err) {
-      if (err) {
-        return fn && fn(err);
-      }
-      --i || fn && fn();
-    });
-    if (this.server) this.closeServer(function(err) {
-      if (err) {
-        return fn && fn(err);
-      }
-      --i || fn && fn();
-    });
-  };
-
-  /**
-   * Close the server.
-   *
-   * @param {Function} [fn]
-   * @api public
-   */
-
-  Socket.prototype.closeServer = function(fn){
-    debug('trace', this.type + ' closing server');
-    this.server.on('close', this.emit.bind(this, 'close'));
-    this.server.close(fn);
-  };
-
-  /**
-   * Return the server address.
-   *
-   * @return {Object}
-   * @api public
-   */
-
-  Socket.prototype.address = function(){
-    if (!this.server) return;
-    var addr = this.server.address();
-    addr.string = (this.get('tls') ? 'tls://' : 'tcp://') + addr.address + ':' + addr.port;
-    return addr;
-  };
-
-  /**
-   * Remove `sock`.
-   *
-   * @param {Socket} sock
-   * @api private
-   */
-
-  Socket.prototype.removeSocket = function(sock){
-    var i = this.socks.indexOf(sock);
-    if (!~i) return;
-    debug('trace', this.type + ' remove socket ' + i);
-    this.socks.splice(i, 1);
-  };
-
-  /**
-   * Add `sock`.
-   *
-   * @param {Socket} sock
-   * @api private
-   */
-
-  Socket.prototype.addSocket = function(sock){
-    var i = this.socks.push(sock) - 1;
-    debug('trace', this.type + ' add socket ' + i);
-    var decoder = msgpack.decoder();
-    sock.pipe(decoder);
-    decoder.on('data', this.onmessage(sock));
-  };
-
-  /**
-   * Handle `sock` errors.
-   *
-   * Emits:
-   *
-   *  - `error` (err) when the error is not ignored
-   *  - `ignored error` (err) when the error is ignored
-   *  - `socket error` (err) regardless of ignoring
-   *
-   * @param {Socket} sock
-   * @api private
-   */
-
-  Socket.prototype.handleErrors = function(sock){
-    var self = this;
-    sock.on('error', function(err){
-      debug('error', self.type + ' error ' + err.code || err.message);
-      self.emit('socket error', err);
-      self.removeSocket(sock);
-      if (!~ignore.indexOf(err.code)) {
-        return self.emit('error', err);
-      }
-      debug('trace', self.type + ' ignored ' + err.code);
-      self.emit('ignored error', err);
-    });
-  };
-
-  /**
-   * Handles framed messages emitted from the parser, by
-   * default it will go ahead and emit the "message" events on
-   * the socket. However, if the "higher level" socket needs
-   * to hook into the messages before they are emitted, it
-   * should override this method and take care of everything
-   * it self, including emitted the "message" event.
-   *
-   * @param {net.Socket} sock
-   * @return {Function} closure(msg, mulitpart)
-   * @api private
-   */
-
-  Socket.prototype.onmessage = function(sock){
-    var self = this;
-
-    return function(args){
-      var id = args.pop();
-      var task = args[0];
-      var emitter = {
-        sock: sock,
-        emit: emit
+      this.settings = {
+        hwm: Infinity,
+        identity: String(process.pid),
+        'retry timeout': 100,
+        'retry max timeout': 5000
       };
-      if (task === 'register') {
-        if (sock.writable) {
-          sock.write(self.pack(['registered', id]));
-        }
-        var data = args[1];
-        return self.emit('register', data.identity, emitter);
-      }
-      if (task === 'registered') {
-        var fn = self.callbacks[id];
-        if (!fn) return debug('error', 'missing callback ' + id);
-        delete self.callbacks[id];
-        return fn(emitter);
-      }
 
-      args = _.cloneDeepWith(args, function(entry) {
-        if (_.isObject(entry) && entry.type === 'Buffer' && entry.data) {
-          return new Buffer(entry.data);
+      this.callbacks = {};
+      this.identity = this.get('identity');
+      this.ids = 0;
+      this.queue = [];
+      this.retry = null;
+      this.connected = false;
+      this.closing = false;
+      this.reconnectTimers = new Set();
+
+      // Flush queued messages after connection.
+
+      this.on('connect', sock => {
+        const messages = this.queue;
+
+        this.queue = [];
+
+        debug('trace', 'flush ' + messages.length + ' messages');
+
+        for (const message of messages) {
+          if (sock && sock.writable) {
+            sock.write(this.pack(message));
+          }
         }
+
+        this.emit('flush', messages);
       });
+    }
 
-      args.unshift('message');
-      args.push(emitter);
-      self.emit.apply(self, args);
+    /**
+     * Get a setting.
+     */
 
-      function emit() {
-        var fn = function(){};
-        var id = self.id();
-        var args = Array.prototype.slice.call(arguments);
-        args[0] = args[0] || null;
+    get(key) {
+      return this.settings[key];
+    }
 
-        var hasCallback = 'function' == typeof args[args.length - 1];
-        if (hasCallback) fn = args.pop();
-        args.push(id);
+    /**
+     * Set a setting.
+     */
 
-        if (sock.writable) {
-          sock.write(self.pack(args), function(){ fn(true); });
-          return true;
-        } else {
-          debug('trace', 'peer went away');
-          process.nextTick(function(){ fn(false); });
-          return false;
+    set(key, value) {
+      this.settings[key] = value;
+      return this;
+    }
+
+    /**
+     * Enqueue a message.
+     */
+
+    enqueue(message) {
+      if (this.queue.length >= this.settings.hwm) {
+        debug('trace', 'drop');
+        this.emit('drop', message);
+        return false;
+      }
+
+      this.queue.push(message);
+      return true;
+    }
+
+    /**
+     * Generate a message ID.
+     */
+
+    id() {
+      return this.identity + ':' + this.ids++;
+    }
+
+    /**
+     * Register a plugin.
+     */
+
+    use(plugin) {
+      plugin(this);
+      return this;
+    }
+
+    /**
+     * Encode a message.
+     */
+
+    pack(args) {
+      return msgpack.encode(args).slice();
+    }
+
+
+    /**
+     * Close underlying sockets.
+     */
+
+    closeSockets(callback) {
+      const sockets = [...this.socks];
+
+      if (sockets.length === 0) {
+        callback();
+        return;
+      }
+
+      let remaining = sockets.length;
+
+      const done = () => {
+        remaining--;
+
+        if (remaining === 0) {
+          callback();
         }
-      }
-    };
-  };
+      };
 
-  Socket.prototype.checkCertificateValidity = function(certificate) {
-    certificate = forge.pki.certificateFromPem(certificate.toString());
-    if (!certificate) {
-      debug('error', this.type + ' no certificate');
-      return false;
-    }
-    var valid_from = new Date(certificate.validity.notBefore);
-    var valid_to = new Date(certificate.validity.notAfter);
-    var now = new Date();
-    if (now - valid_from < 0) {
-      debug('error', this.type + ' certificate not yet in effect');
-      debug('error', this.type + ' certificate will become valid the ' + valid_from.toJSON());
-      return false;
-    }
-    var dateDiff = now - valid_to;
-    if (dateDiff >= 0) {
-      debug('error', this.type + ' certificate expired the ' + valid_to.toJSON());
-      return false;
-    }
-    if (dateDiff / (1000 * 60 * 60 * 24) >= -30) {
-      debug('warn', this.type + ' certificate will soon expire : ' + valid_to.toJSON());
-    }
-    return true;
-  };
+      for (const sock of sockets) {
+        if (sock.destroyed) {
+          this.removeSocket(sock);
+          done();
+          continue;
+        }
 
-
-  /**
-   * Connect to `port` at `host` and invoke `fn()`.
-   *
-   * Defaults `host` to localhost.
-   *
-   * TODO: needs big cleanup
-   *
-   * @param {Number|String} port
-   * @param {String} host
-   * @param {Function} fn
-   * @return {Socket}
-   * @api public
-   */
-
-  Socket.prototype.connect = function(identity, port, host, fn){
-    var self = this;
-    if ('server' == this.type) throw new Error('cannot connect() after bind()');
-    if ('function' == typeof host) {
-      fn = host;
-      host = undefined;
-    }
-
-    if ('string' == typeof port) {
-      port = url.parse(port);
-
-      if (port.protocol == "unix:") {
-        host = fn;
-        fn = undefined;
-        port = port.pathname;
-      } else {
-        host = port.hostname || '0.0.0.0';
-        port = parseInt(port.port, 10);
-      }
-    } else {
-      host = host || '0.0.0.0';
-    }
-
-    var max = self.get('retry max timeout');
-    this.type = 'client';
-    var sock;
-    var tlsOpts = this.get('tls');
-
-    if (tlsOpts && tlsOpts.cert) {
-      if (!this.checkCertificateValidity(tlsOpts.cert)) {
-        throw new Error('Invalid certificate');
+        sock.once('close', done);
+        sock.end();
       }
     }
 
-    var onConnect = function() {
-      debug('trace', self.type + ' connect');
-      self.connected = true;
-      self.addSocket(sock);
-      self.retry = self.get('retry timeout');
-      self.emit('connect', sock);
-      fn && fn(null, sock);
-    };
+    /**
+     * Close the server.
+     */
 
-    if (tlsOpts) {
-      tlsOpts.host = host;
-      tlsOpts.port = port;
-      debug('trace', self.type + ' connect attempt ' + host + ':' + port);
-      sock = tls.connect(tlsOpts, onConnect);
-    } else {
-      sock = new net.Socket();
-      debug('trace', self.type + ' connect attempt ' + host + ':' + port);
-      sock.connect(port, host);
-      sock.on('connect', onConnect);
-    }
-
-    sock.identity = identity;
-    sock.setNoDelay();
-
-    this.handleErrors(sock);
-
-    sock.on('close', function() {
-      sock.removeAllListeners();
-      sock.destroy();
-      self.emit('socket close', sock.identity);
-      self.connected = false;
-      self.removeSocket(sock);
-      if (self.closing) {
-        return self.emit('close');
+    closeServer(callback) {
+      if (!this.server || !this.server.listening) {
+        callback();
+        return;
       }
-      var retry = self.retry || self.get('retry timeout');
-      setTimeout(function(){
-        debug('trace', self.type + ' attempting reconnect');
-        self.emit('reconnect attempt');
-        self.connect(identity, port, host, fn);
-        self.retry = Math.round(Math.min(max, retry * 1.5));
-      }, retry);
-    });
 
-    return this;
-  };
+      this.server.close(callback);
+    }
 
-  Socket.prototype.register = function(identity, host, fn) {
-    var self = this;
-    var data = {identity: this.get('identity')};
-    if ('server' == this.type) throw new Error('cannot connect() after bind()');
+    /**
+     * Close the socket.
+     */
 
-    var port;
-    if ('number' === typeof host) {
-      port = host;
-      host = '0.0.0.0';
-    } else if ('string' == typeof host) {
-      port = url.parse(host);
+    close(callback) {
+      callback = callback || (() => {});
 
-      if (port.protocol == "unix:") {
-        host = fn;
-        port = port.pathname;
-      } else {
-        host = port.hostname || '0.0.0.0';
-        port = parseInt(port.port, 10);
+      if (this.closing) {
+        callback();
+        return this;
       }
-    } else {
-      throw new Error('invalid host parameter');
-    }
-    fn = fn || function(){};
-    this.connect(identity, port, host, function(err, sock) {
-      var args = ['register', data];
-      var id = self.id();
-      self.callbacks[id] = fn;
-      args.push(id);
-      if (sock) {
-        sock.write(self.pack(args));
-      } else {
-        debug('trace', 'no connected peers');
-        self.enqueue(args);
+
+      debug('trace', this.type + ' closing');
+
+      this.closing = true;
+
+      for (const timer of this.reconnectTimers) {
+        clearTimeout(timer);
       }
-    });
-  };
 
-  /**
-   * Handle connection.
-   *
-   * @param {Socket} sock
-   * @api private
-   */
+      this.reconnectTimers.clear();
 
-  Socket.prototype.onconnect = function(sock){
-    var self = this;
-    var addr = sock.remoteAddress + ':' + sock.remotePort;
-    var tlsOptions = self.get('tls');
-    if (tlsOptions && !sock.authorized) {
-      debug('error', self.type + ' denied ' + addr + ' for authorizationError ' + sock.authorizationError);
-    }
-    debug('debug', self.type + ' accept ' + addr);
-    this.addSocket(sock);
-    this.handleErrors(sock);
-    this.emit('connect', sock);
-    sock.on('close', function() {
-      debug('debug', self.type + ' disconnect ' + addr);
-      self.emit('disconnect', sock.identity);
-      self.removeSocket(sock);
-    });
-  };
+      const tasks = [];
 
-  /**
-   * Bind to `port` at `host` and invoke `fn()`.
-   *
-   * Defaults `host` to INADDR_ANY.
-   *
-   * Emits:
-   *
-   *  - `connection` when a client connects
-   *  - `disconnect` when a client disconnects
-   *  - `bind` when bound and listening
-   *
-   * @param {Number|String} port
-   * @param {Function} fn
-   * @return {Socket}
-   * @api public
-   */
+      tasks.push(new Promise(resolve => {
+        this.closeSockets(resolve);
+      }));
 
-  Socket.prototype.bind = function(port, host, fn){
-    var self = this;
-    if ('client' == this.type) throw new Error('cannot bind() after connect()');
-    if ('function' == typeof host) {
-      fn = host;
-      host = undefined;
-    }
-
-    var unixSocket = false;
-
-    if ('string' == typeof port) {
-      port = url.parse(port);
-
-      if ('unix:' == port.protocol) {
-        host = fn;
-        fn = undefined;
-        port = port.pathname;
-        unixSocket = true;
-      } else {
-        host = port.hostname || '0.0.0.0';
-        port = parseInt(port.port, 10);
-      }
-    } else {
-      host = host || '0.0.0.0';
-    }
-
-    this.type = 'server';
-    this.set('host', host);
-    this.set('port', port);
-
-    var tlsOptions = this.get('tls');
-
-    if (tlsOptions && tlsOptions.cert) {
-      if (!this.checkCertificateValidity(tlsOptions.cert)) {
-        throw new Error('Invalid certificate');
-      }
-    }
-    if (tlsOptions) {
-      tlsOptions.requestCert = tlsOptions.requestCert !== false;
-      tlsOptions.rejectUnauthorized = tlsOptions.rejectUnauthorized !== false;
-      this.server = tls.createServer(tlsOptions, this.onconnect.bind(this));
-    } else {
-      this.server = net.createServer(this.onconnect.bind(this));
-    }
-
-    debug('trace', this.type + ' bind ' + host + ':' + port);
-    this.server.on('listening', this.emit.bind(this, 'bind'));
-
-    if (unixSocket) {
-      // TODO: move out
-      this.server.on('error', function(e) {
-        if (e.code == 'EADDRINUSE') {
-          // Unix file socket and error EADDRINUSE is the case if
-          // the file socket exists. We check if other processes
-          // listen on file socket, otherwise it is a stale socket
-          // that we could reopen
-          // We try to connect to socket via plain network socket
-          var clientSocket = new net.Socket();
-
-          clientSocket.on('error', function(e2) {
-            if (e2.code == 'ECONNREFUSED') {
-              // No other server listening, so we can delete stale
-              // socket file and reopen server socket
-              fs.unlink(port);
-              self.server.listen(port, host, fn);
+      if (this.server) {
+        tasks.push(new Promise((resolve, reject) => {
+          this.closeServer(error => {
+            if (error) {
+              reject(error);
+            } else {
+              resolve();
             }
           });
+        }));
+      }
 
-          clientSocket.connect({path: port}, function() {
-            // Connection is possible, so other server is listening
-            // on this file socket
-            throw e;
-          });
-        }
+      Promise.all(tasks).then(
+        () => callback(),
+        error => callback(error)
+      );
+
+      return this;
+    }
+
+    /**
+     * Return server address.
+     */
+
+    address() {
+      if (!this.server) {
+        return undefined;
+      }
+
+      const address = this.server.address();
+
+      if (!address) {
+        return undefined;
+      }
+
+      if (typeof address === 'string') {
+        return {
+          address,
+          string: 'unix://' + address
+        };
+      }
+
+      return {
+        ...address,
+        string:
+          (this.get('tls') ? 'tls://' : 'tcp://') +
+          address.address + ':' + address.port
+      };
+    }
+
+    /**
+     * Remove a socket.
+     */
+
+    removeSocket(sock) {
+      const index = this.socks.indexOf(sock);
+
+      if (index === -1) {
+        return;
+      }
+
+      debug('trace', this.type + ' remove socket ' + index);
+
+      this.socks.splice(index, 1);
+    }
+
+    /**
+     * Add a socket and attach its MessagePack decoder.
+     */
+
+    addSocket(sock) {
+      if (this.socks.includes(sock)) {
+        return;
+      }
+
+      const index = this.socks.push(sock) - 1;
+
+      debug('trace', this.type + ' add socket ' + index);
+
+      const decoder = msgpack.decoder();
+
+      sock.pipe(decoder);
+
+      decoder.on('data', this.onmessage(sock));
+
+      decoder.on('error', error => {
+        this.emit('error', error);
       });
     }
 
-    this.server.listen(port, host, fn);
-    return this;
-  };
+    /**
+     * Handle socket errors.
+     */
 
-  Socket.prototype.addCa = function(ca, callback){
-    var self = this;
-    var tlsOptions = this.get('tls');
-    if (!tlsOptions) {
-      throw new Error('no tls options found');
-    }
-    tlsOptions.ca = tls.ca || [];
-    tlsOptions.ca.push(ca);
-    if (_.isFunction(this.server.setSecureContext)) {
-      this.server.setSecureContext(tls);
-    } else {
-      this.set('tls', tlsOptions);
-      this.server.close(function(err) {
-        if (err) {
-          self.emit('error', err);
-          if (callback) {
-            callback(err);
-          }
+    handleErrors(sock) {
+      sock.on('error', error => {
+        debug(
+          'error',
+          this.type + ' error ' + (error.code || error.message)
+        );
+
+        this.emit('socket error', error);
+
+        this.removeSocket(sock);
+
+        if (!ignoredErrors.has(error.code)) {
+          this.emit('error', error);
           return;
         }
-        self.bind(self.get('port'), self.get('host'), function(err) {
-          if (err) {
-            self.emit('error', err);
-            if (callback) {
-              callback(err);
-            }
-            return;
-          }
-          if (callback) {
-            callback();
-          }
-        });
+
+        debug('trace', this.type + ' ignored ' + error.code);
+
+        this.emit('ignored error', error);
       });
     }
-  };
+
+    /**
+     * Handle incoming MessagePack messages.
+     */
+
+    onmessage(sock) {
+      return args => {
+        const id = args.pop();
+        const task = args[0];
+
+        const emitter = {
+          sock,
+
+          emit: (...messageArgs) => {
+            const callback =
+              typeof messageArgs[messageArgs.length - 1] === 'function'
+                ? messageArgs.pop()
+                : null;
+
+            const messageId = this.id();
+
+            messageArgs[0] = messageArgs[0] || null;
+            messageArgs.push(messageId);
+
+            if (sock.writable && !sock.destroyed) {
+              sock.write(this.pack(messageArgs), () => {
+                if (callback) {
+                  callback(true);
+                }
+              });
+
+              return true;
+            }
+
+            debug('trace', 'peer went away');
+
+            process.nextTick(() => {
+              if (callback) {
+                callback(false);
+              }
+            });
+
+            return false;
+          }
+        };
+
+        if (task === 'register') {
+          if (sock.writable && !sock.destroyed) {
+            sock.write(this.pack(['registered', id]));
+          }
+
+          const data = args[1];
+
+          return this.emit('register', data.identity, emitter);
+        }
+
+        if (task === 'registered') {
+          const callback = this.callbacks[id];
+
+          if (!callback) {
+            debug('error', 'missing callback ' + id);
+            return;
+          }
+
+          delete this.callbacks[id];
+
+          return callback(emitter);
+        }
+
+        const decodedArgs = _.cloneDeepWith(args, entry => {
+          if (
+            _.isObject(entry) &&
+            entry.type === 'Buffer' &&
+            Array.isArray(entry.data)
+          ) {
+            return Buffer.from(entry.data);
+          }
+
+          return undefined;
+        });
+
+        decodedArgs.unshift('message');
+        decodedArgs.push(emitter);
+
+        this.emit(...decodedArgs);
+      };
+    }
+
+    /**
+     * Check certificate validity.
+     */
+
+    checkCertificateValidity(certificate) {
+      try {
+        const cert = new X509Certificate(certificate);
+
+        const validFrom = new Date(cert.validFrom);
+        const validTo = new Date(cert.validTo);
+        const now = new Date();
+
+        if (now < validFrom) {
+          debug('error', this.type + ' certificate not yet in effect');
+
+          debug(
+            'error',
+            this.type + ' certificate will become valid the ' +
+            validFrom.toJSON()
+          );
+
+          return false;
+        }
+
+        if (now >= validTo) {
+          debug(
+            'error',
+            this.type + ' certificate expired the ' + validTo.toJSON()
+          );
+
+          return false;
+        }
+
+        const daysRemaining =
+          (validTo.getTime() - now.getTime()) /
+          (1000 * 60 * 60 * 24);
+
+        if (daysRemaining <= 30) {
+          debug(
+            'warn',
+            this.type + ' certificate will soon expire : ' +
+            validTo.toJSON()
+          );
+        }
+
+        return true;
+
+      } catch (error) {
+        debug(
+          'error',
+          this.type + ' invalid certificate: ' + error.message
+        );
+
+        return false;
+      }
+    }
+
+
+    /**
+     * Connect to a remote server.
+     */
+
+    connect(identity, port, host, callback) {
+      if (this.type === 'server') {
+        throw new Error('cannot connect() after bind()');
+      }
+
+      if (typeof host === 'function') {
+        callback = host;
+        host = undefined;
+      }
+
+      callback = callback || (() => {});
+
+      let address;
+
+      if (typeof port === 'string') {
+        address = parseAddress(port);
+
+        if (address.unix) {
+          host = undefined;
+          port = address.path;
+        } else {
+          host = address.host;
+          port = address.port;
+        }
+      } else {
+        host = host || '0.0.0.0';
+      }
+
+      const maxRetry = this.get('retry max timeout');
+      const tlsOptions = this.get('tls');
+
+      this.type = 'client';
+
+      if (this.closing) {
+        return this;
+      }
+
+      if (tlsOptions && tlsOptions.cert) {
+        if (!this.checkCertificateValidity(tlsOptions.cert)) {
+          throw new Error('Invalid certificate');
+        }
+      }
+
+      let sock;
+      let connected = false;
+
+      const onConnect = () => {
+        if (this.closing || sock.destroyed) {
+          sock.destroy();
+          return;
+        }
+
+        debug('trace', this.type + ' connect');
+
+        connected = true;
+        this.connected = true;
+        this.retry = this.get('retry timeout');
+
+        this.addSocket(sock);
+        this.emit('connect', sock);
+
+        callback(null, sock);
+      };
+
+      if (tlsOptions) {
+        const options = {
+          ...tlsOptions
+        };
+
+        if (typeof port === 'string') {
+          options.path = port;
+        } else {
+          options.host = host;
+          options.port = port;
+        }
+
+        debug('trace', this.type + ' connect attempt');
+
+        sock = tls.connect(options, onConnect);
+
+      } else {
+        sock = new net.Socket();
+
+        debug(
+          'trace',
+          this.type + ' connect attempt ' + host + ':' + port
+        );
+
+        if (typeof port === 'string') {
+          sock.connect(port);
+        } else {
+          sock.connect(port, host);
+        }
+
+        sock.once('connect', onConnect);
+      }
+
+      sock.identity = identity;
+
+      sock.setNoDelay();
+
+      this.handleErrors(sock);
+
+      sock.on('close', () => {
+        sock.removeAllListeners();
+
+        if (connected) {
+          this.emit('socket close', sock.identity);
+        }
+
+        this.connected = false;
+        this.removeSocket(sock);
+
+        if (this.closing) {
+          this.emit('close');
+          return;
+        }
+
+        const retry = this.retry || this.get('retry timeout');
+
+        const timer = setTimeout(() => {
+          this.reconnectTimers.delete(timer);
+
+          if (this.closing) {
+            return;
+          }
+
+          debug('trace', this.type + ' attempting reconnect');
+
+          this.emit('reconnect attempt');
+
+          this.connect(identity, port, host, callback);
+
+          this.retry = Math.round(
+            Math.min(maxRetry, retry * 1.5)
+          );
+
+        }, retry);
+
+        this.reconnectTimers.add(timer);
+      });
+
+      return this;
+    }
+
+    /**
+     * Register with a remote server.
+     */
+
+
+    /**
+     * Register with a remote server.
+     */
+
+    register(identity, host, callback) {
+      const data = {
+        identity: this.get('identity')
+      };
+
+      if (this.type === 'server') {
+        throw new Error('cannot register() after bind()');
+      }
+
+      const onConnect = (err, sock) => {
+        if (err) {
+          return;
+        }
+
+        const args = ['register', data];
+        const id = this.id();
+
+        this.callbacks[id] = callback || (() => {});
+
+        args.push(id);
+
+        if (sock && sock.writable) {
+          sock.write(this.pack(args));
+        } else {
+          debug('trace', 'no connected peers');
+          this.enqueue(args);
+        }
+      };
+
+      if (typeof host === 'number') {
+        this.connect(identity, host, '0.0.0.0', onConnect);
+      } else if (typeof host === 'string') {
+        this.connect(identity, host, onConnect);
+      } else {
+        throw new Error('invalid host parameter');
+      }
+    }
+
+
+    /**
+     * Handle an incoming connection.
+     */
+
+    onconnect(sock) {
+      const address = sock.remoteAddress + ':' + sock.remotePort;
+      const tlsOptions = this.get('tls');
+
+      if (tlsOptions && !sock.authorized) {
+        debug(
+          'error',
+          this.type + ' denied ' + address +
+          ' for authorizationError ' + sock.authorizationError
+        );
+      }
+
+      debug('debug', this.type + ' accept ' + address);
+
+      this.addSocket(sock);
+      this.handleErrors(sock);
+
+      this.emit('connect', sock);
+
+      sock.on('close', () => {
+        debug('debug', this.type + ' disconnect ' + address);
+
+        this.emit('disconnect', sock.identity);
+        this.removeSocket(sock);
+      });
+    }
+
+    /**
+     * Bind to a port and start listening.
+     */
+
+    bind(port, host, callback) {
+      if (this.type === 'client') {
+        throw new Error('cannot bind() after connect()');
+      }
+
+      if (typeof host === 'function') {
+        callback = host;
+        host = undefined;
+      }
+
+      let unixSocket = false;
+
+      if (typeof port === 'string') {
+        const address = parseAddress(port);
+
+        if (address.unix) {
+          host = undefined;
+          port = address.path;
+          unixSocket = true;
+        } else {
+          host = address.host;
+          port = address.port;
+        }
+      } else {
+        host = host || '0.0.0.0';
+      }
+
+      this.type = 'server';
+
+      this.set('host', host);
+      this.set('port', port);
+
+      const tlsOptions = this.get('tls');
+
+      if (tlsOptions && tlsOptions.cert) {
+        if (!this.checkCertificateValidity(tlsOptions.cert)) {
+          throw new Error('Invalid certificate');
+        }
+      }
+
+      if (tlsOptions) {
+        tlsOptions.requestCert = tlsOptions.requestCert !== false;
+        tlsOptions.rejectUnauthorized =
+          tlsOptions.rejectUnauthorized !== false;
+
+        this.server = tls.createServer(
+          tlsOptions,
+          this.onconnect.bind(this)
+        );
+      } else {
+        this.server = net.createServer(
+          this.onconnect.bind(this)
+        );
+      }
+
+      debug(
+        'trace',
+        this.type + ' bind ' + host + ':' + port
+      );
+
+      this.server.on('listening', () => {
+        this.emit('bind');
+      });
+
+      if (unixSocket) {
+        this.server.on('error', error => {
+          if (error.code !== 'EADDRINUSE') {
+            this.emit('error', error);
+            return;
+          }
+
+          const clientSocket = new net.Socket();
+
+          clientSocket.once('error', clientError => {
+            if (clientError.code === 'ECONNREFUSED') {
+              fs.unlink(port, unlinkError => {
+                if (unlinkError && unlinkError.code !== 'ENOENT') {
+                  this.emit('error', unlinkError);
+                  return;
+                }
+
+                this.server.listen(port, callback);
+              });
+            } else {
+              this.emit('error', clientError);
+            }
+          });
+
+          clientSocket.connect({ path: port }, () => {
+            clientSocket.destroy();
+            this.emit('error', error);
+          });
+        });
+      }
+
+      if (unixSocket) {
+        this.server.listen(port, callback);
+      } else {
+        this.server.listen(port, host, callback);
+      }
+
+      return this;
+    }
+
+    /**
+     * Add a CA certificate to the TLS server.
+     */
+
+    addCa(ca, callback) {
+      const tlsOptions = this.get('tls');
+
+      if (!tlsOptions) {
+        throw new Error('no tls options found');
+      }
+
+      if (!this.server) {
+        throw new Error('server is not initialized');
+      }
+
+      tlsOptions.ca = tlsOptions.ca || [];
+      tlsOptions.ca.push(ca);
+
+      if (typeof this.server.setSecureContext === 'function') {
+        this.server.setSecureContext({
+          ...tlsOptions,
+          ca: tlsOptions.ca
+        });
+
+        if (callback) {
+          callback();
+        }
+
+        return this;
+      }
+
+      this.set('tls', tlsOptions);
+
+      this.server.close(error => {
+        if (error) {
+          this.emit('error', error);
+
+          if (callback) {
+            callback(error);
+          }
+
+          return;
+        }
+
+        this.bind(
+          this.get('port'),
+          this.get('host'),
+          callback
+        );
+      });
+
+      return this;
+    }
+
+  }
 
   return Socket;
 };
+

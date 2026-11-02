@@ -1,19 +1,33 @@
-var socket = require('./socket');
-var EventEmitter = require('events').EventEmitter;
-var asynk = require('asynk');
-var uuid = require('uuid');
-var inherits = require('util').inherits;
+'use strict';
 
-var telepathymq = module.exports = function(identity, debugFunction) {
-  EventEmitter.call(this);
-  this.identity = identity;
-  this.relations = {};
-  this.debug = debugFunction || new Function();
-  this.defers = {};
-  this.socks = [];
-};
+/**
+ * Module dependencies.
+ */
 
-inherits(telepathymq, EventEmitter);
+const createSocket = require('./socket');
+const { EventEmitter } = require('node:events');
+const { randomUUID } = require('node:crypto');
+const asynk = require('asynk');
+
+/**
+ * Expose Telepathymq.
+ */
+
+class Telepathymq extends EventEmitter {
+
+  constructor(identity, debugFunction) {
+    super();
+
+    this.identity = identity;
+    this.relations = {};
+    this.debug = debugFunction || (() => {});
+    this.defers = {};
+    this.socks = [];
+  }
+
+}
+
+module.exports = Telepathymq;
 
 var deferHandler = function(self, task, event, emitter) {
   switch (task) {
@@ -62,10 +76,11 @@ var eventHandler = function(self, task, event) {
 };
 
 
-telepathymq.prototype.listen = function(port, host, fn) {
-  var self = this;
-  var Socket = socket(this.debug);
-  var sock = new Socket();
+Telepathymq.prototype.listen = function(port, host, fn) {
+  const self = this;
+  const Socket = createSocket(this.debug);
+  const sock = new Socket();
+
   sock.set('identity', this.identity);
   sock.on('register', function(identity, emitter) {
     self.relations[identity] = emitter;
@@ -90,15 +105,15 @@ telepathymq.prototype.listen = function(port, host, fn) {
   return sock;
 };
 
-telepathymq.prototype.register = function(identity, connectString, options, cb) {
-  var self = this;
+Telepathymq.prototype.register = function(identity, connectString, options, cb) {
+  const self = this;
   if (typeof options === 'function') {
     cb = options;
     options = null;
   }
   cb = cb || new Function();
-  var Socket = socket(this.debug);
-  var sock = new Socket();
+  const Socket = createSocket(this.debug);
+  const sock = new Socket();
   sock.set('identity', this.identity);
   if (connectString.startsWith('tls') && typeof options === 'object') {
     sock.set('tls', options);
@@ -119,16 +134,16 @@ telepathymq.prototype.register = function(identity, connectString, options, cb) 
   this.socks.push(sock);
 };
 
-telepathymq.prototype.defer = function(identity, eventName, data) {
-  var defer = asynk.deferred();
-  var emitter = this.relations[identity];
+Telepathymq.prototype.defer = function(identity, eventName, data) {
+  const defer = asynk.deferred();
+  const emitter = this.relations[identity];
   if (!emitter) {
     defer.reject(new Error(identity + ' is not registered'));
     return defer;
   }
-  var deferId = uuid.v4();
+  const deferId = randomUUID();
   this.defers[deferId] = defer;
-  var event = {
+  const event = {
     name: eventName,
     id: deferId,
     data: data
@@ -137,12 +152,12 @@ telepathymq.prototype.defer = function(identity, eventName, data) {
   return defer.promise();
 };
 
-telepathymq.prototype.emit = function(identity, eventName, data) {
-  var emitter = this.relations[identity];
+Telepathymq.prototype.emit = function(identity, eventName, data) {
+  const emitter = this.relations[identity];
   if (!emitter) {
     return false;
   }
-  var event = {
+  const event = {
     name: eventName,
     data: data
   };
@@ -150,7 +165,7 @@ telepathymq.prototype.emit = function(identity, eventName, data) {
   return true;
 };
 
-telepathymq.prototype.close = function(cb) {
+Telepathymq.prototype.close = function(cb) {
   cb = cb || new Function();
   asynk.each(this.socks, function(sock, cb) {
     sock.close(cb);
