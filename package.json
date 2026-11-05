@@ -1,7 +1,7 @@
 {
   "name": "telepathymq",
-  "version": "1.0.1",
-  "description": "IPC for Node.js",
+  "version": "2.0.0",
+  "description": "Modernized IPC and TCP/TLS communication library for Node.js",
   "author": {
     "name": "Nicolas AMIOT",
     "email": "n.amiot@bringyoup.fr",
@@ -10,7 +10,8 @@
       {
         "name": "Alexandre Tiertant",
         "email": "a.tiertant@atlantis-software.net",
-        "url": "https://github.com/Atlantis-Software/telepathymq.git"
+        "url": "https://github.com/Atlantis-Software/telepathymq.git",
+         "description": "Original contributor"
       }
     ]
   },
