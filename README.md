@@ -1,105 +1,138 @@
-# telepathymq
+# TelepathyMQ
 
-a nodejs module for inter-process communication that let you share javascript  object and events over network that support tcp and secure tls sockets.
+## Inter-process communication for Node.js
 
-[![npm version](https://badge.fury.io/js/telepathymq.svg)](https://www.npmjs.com/telepathymq)
-[![Build Status](https://travis-ci.org/Atlantis-Software/telepathymq.svg?branch=master)](https://travis-ci.org/Atlantis-Software/telepathymq)
-[![Coverage Status](https://coveralls.io/repos/github/Atlantis-Software/telepathymq/badge.svg?branch=master)](https://coveralls.io/github/Atlantis-Software/telepathymq?branch=master)
-[![Dependencies Status](https://david-dm.org/Atlantis-Software/telepathymq.svg)](https://david-dm.org/Atlantis-Software/telepathymq)
+TelepathyMQ is a Node.js library that enables independent processes to communicate through events and asynchronous operations.
+
+It provides an identity-based communication layer over TCP, TLS and Unix domain sockets.
+
+## Features
+Identity-based communication — address remote nodes by their identity.
+Event messaging — send and receive JavaScript events between processes.
+Deferred operations — perform asynchronous request/response exchanges with progress notifications.
+TCP and TLS — communicate over standard or secured network connections.
+Unix domain sockets — communicate locally without TCP.
+Automatic reconnection — reconnect when a remote connection is interrupted.
+MessagePack serialization — exchange structured JavaScript data efficiently.
+
+## Requirements
+Node.js >= 20.20.0
 
 ## Installation
-telepathymq is available over npm
-```
+
 npm install telepathymq
-```
 
-## Sample
+## Quick start
 
-this code initialise connection between client and server side and send an "hello world" message
-```
-var Telepathy = require('telepathymq');
+The following example demonstrates communication between two independent Node.js processes.
 
-// initialise the server side
-// the constructor take a string argument for the instance identity
-// used to send data from other node.
-// it must be uniq on connected nodes.
-var server = new Telepathy('server');
-server.listen(8060, function() {
-  console.log('server is listening on port 8060');
-});
-server.on('register', function(identity) {
-  console.log(identity + ' has registered on server');
-});
-server.on('message', function(msg) {
-  console.log('message: ' + msg);
+1. Start the server
+
+Create server.js:
+
+```javascript
+const TelepathyMQ = require('telepathymq');
+
+const server = new TelepathyMQ('server');
+
+server.on('register', (identity) => {
+  console.log(`${identity} connected`);
 });
 
-// initialise the client side
-var client = new Telepathy('client');
-client.register('server', 'tcp://localhost:8060');
-client.on('register', function(identity) {
-  console.log(identity + ' has registered on client');
-  // emit an event called 'message' on 'server' with a string 'hello world' as data
-  client.emit('server', 'message', 'hello world');
+server.on('message', (message) => {
+  console.log('Received:', message);
+});
+
+server.listen(8060, () => {
+  console.log('Server listening on port 8060');
 });
 ```
 
-## Methods
+2. Start the client
 
-### server.listen()
-Start a server listening for connections.
-Possible signatures:
-* listen(port, [ip,] callback) 
-* listen(url, options, callback)
+Create client.js:
 
-### server.listen(port, [ip,] callback) 
-port: integer tcp port number
-ip: string ip address (optional, default: '0.0.0.0')
-callback: function
+```javascript
+const TelepathyMQ = require('telepathymq');
 
-### server.listen(connectString, [options,] callback)
-connectString: string {tcp | tls}://{ip | hostname}:{port}
-options: object [see node tls.createServer options](https://nodejs.org/api/tls.html) only use in tls protocol
-callback: function
+const client = new TelepathyMQ('client');
 
-### client.register(identity, connectString, [options,] callback)
-immediately initiates connection.
-When the connection is established, a `'register'` event will be emitted on the client.
+client.on('register', (identity) => {
+  console.log(`Connected to ${identity}`);
 
-identity: string identity of server node
-connectString: string {tcp | tls}://{ip | hostname}:{port}
-options: object [see node tls.connect options](https://nodejs.org/api/tls.html) only use in tls protocol
-callback: function
-
-### node.emit(identity, eventName, data)
-emit an event on identity node.
-
-identity: string identity of the other side node.
-eventName: string the name of the event being emited
-data: string,object data being sent over event
-
-### node.on(eventName, listener)
-Adds the `listener` function to the end of the listeners array for the event named `eventName`.
-
-eventName: string the name of the event.
-listener: function
-
-### node.defer(identity, eventName[, data])
-return an [asynk](https://www.npmjs.com/package/asynk) promise and send an asynk deferred.
-
-identity: string identity of the other side node.
-eventName: string the name of the event being emited
-data: string,object data being sent over event
-
-```
-server.on('myDefer', function(defer, data) {
-  if (data.val === 1) {
-    defer.notify('some data');
-  }
+  client.emit('server', 'message', {
+    text: 'Hello from TelepathyMQ!',
+    timestamp: Date.now()
+  });
 });
 
-var promise = client.defer('server', 'myDefer', {val: 1});
-promise.progress(function(data) {
-  console.log(data);
-});
+client.register('server', 'tcp://127.0.0.1:8060');
 ```
+
+3. Run the example
+
+Open two terminals.
+
+Terminal 1:
+
+node server.js
+
+
+Terminal 2:
+
+node client.js
+
+
+The server receives the message sent by the client.
+
+## How it works
+
+Each TelepathyMQ instance has an identity.
+
+For example:
+    server identifies the server process.
+    client identifies the client process.
+
+Once a connection is established, the two processes can exchange events using their respective identities.
+
+text
++-------------------+       TCP       +-------------------+
+|                   |                 |                   |
+|     Client        | <-------------> |      Server       |
+|                   |                 |                   |
+|   identity:       |                 |   identity:       |
+|   client          |                 |   server          |
+|                   |                 |                   |
+|   emit()          |                 |   on()            |
+|                   |                 |                   |
++-------------------+                 +-------------------+
+
+## Documentation
+
+Detailed documentation is available in English and French.
+
+### English
+Getting Started
+Core Concepts
+Messaging
+Request / Response
+TLS Configuration
+API Reference
+Troubleshooting
+
+### Français
+Documentation française
+Guide de démarrage
+
+## API overview
+Method	                  Description
+new TelepathyMQ(identity)	Create a communication node
+listen()	                Start listening for incoming connections
+register()	              Connect to a remote node
+emit()	                  Send an event to a remote node
+on()	                    Listen for local events and incoming messages
+defer()	                  Start a deferred request/response operation
+close()	                  Close managed connections
+
+## License
+MIT

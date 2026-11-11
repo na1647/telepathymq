@@ -1,5 +1,5 @@
 {
-  "name": "telepathymq",
+  "name": "@na1647/telepathymq",
   "version": "2.0.0",
   "description": "Modernized IPC and TCP/TLS communication library for Node.js",
   "author": {
